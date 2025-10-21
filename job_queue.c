@@ -27,7 +27,31 @@ int job_queue_init(struct job_queue *job_queue, int capacity) {
 }
 
 int job_queue_destroy(struct job_queue *job_queue) {
-  assert(0);
+  pthread_mutex_lock(&job_queue->lock);
+
+    // 1) Start shutdown: no more blocking pops; future pushes will fail
+    job_queue->destroying = 1;
+
+    // 2) Wake everyone so they can notice 'destroying'
+    pthread_cond_broadcast(&job_queue->not_empty); // wake consumers blocked on empty
+    pthread_cond_broadcast(&job_queue->not_full);  // wake producers blocked on full
+
+    // 3) Wait until the queue is drained by consumers
+    while (job_queue->count > 0) {
+        // Each successful pop signals not_full, so this will progress
+        pthread_cond_wait(&job_queue->not_full, &job_queue->lock);
+    }
+
+    pthread_mutex_unlock(&job_queue->lock);
+
+    // 4) Now it’s safe to tear down OS objects & memory
+    pthread_cond_destroy(&job_queue->not_empty);
+    pthread_cond_destroy(&job_queue->not_full);
+    pthread_mutex_destroy(&job_queue->lock);
+    free(job_queue->buffer);
+    job_queue->buffer = NULL;
+
+    return 0;
 }
 
 int job_queue_push(struct job_queue *job_queue, void *data) {
@@ -61,12 +85,12 @@ int job_queue_push(struct job_queue *job_queue, void *data) {
 int job_queue_pop(struct job_queue *job_queue, void **data) {
   pthread_mutex_lock(&job_queue->lock);
 
-  while (count == 0 && !job_queue->destroying) {
+  while (job_queue->count == 0 && !job_queue->destroying) {
         pthread_cond_wait(&job_queue->not_empty, &job_queue->lock);
     }
 
-  if (job_queue->destroying && count == 0) {
-    pthread_mutex_unlock(&lock);
+  if (job_queue->destroying && job_queue->count == 0) {
+    pthread_mutex_unlock(&job_queue->lock);
     return -1;
   }
 
