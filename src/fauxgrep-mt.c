@@ -157,10 +157,6 @@ int main(int argc, char * const *argv) {
   job_queue_destroy(jq);
   
   free(jq);
-  
-  
-  
-  
 
   return 0;
 }
