@@ -39,12 +39,13 @@ int fauxgrep_file(char const *needle, char const *path) {
   int lineno = 1;
 
   while (getline(&line, &linelen, f) != -1) {
-    assert(pthread_mutex_lock(&stdout_mutex) == 0);
+    // FIX #2: only lock when we actually print
     if (strstr(line, needle) != NULL) {
+      assert(pthread_mutex_lock(&stdout_mutex) == 0);
       printf("%s:%d: %s", path, lineno, line);
+      assert(pthread_mutex_unlock(&stdout_mutex) == 0);
     }
     lineno++;
-    assert(pthread_mutex_unlock(&stdout_mutex) == 0);
   }
 
   free(line);
@@ -102,14 +103,8 @@ int main(int argc, char * const *argv) {
   jq=malloc(sizeof(struct job_queue));
   job_queue_init(jq,10);
 
-  for(int i=0;paths[i]!=NULL;i++){
-    char *pathscopy=strdup(paths[i]);
-    
-    if (pathscopy == NULL) {
-      err(1, "strdup failed");
-    }
-    job_queue_push(jq,pathscopy);
-  }
+  // (Optional earlier push of argv paths removed — not needed)
+
   struct tworker tw[num_threads];
   for(int i=0;i<num_threads;i++){
     tw[i].jq=jq;
@@ -138,7 +133,13 @@ int main(int argc, char * const *argv) {
     case FTS_D:
       break;
     case FTS_F:
-      fauxgrep_file(needle, p->fts_path);
+  
+
+      {
+        char *copy = strdup(p->fts_path);
+        if (!copy) err(1, "strdup failed");
+        job_queue_push(jq, copy);
+      }
       break;
     default:
       break;
