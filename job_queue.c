@@ -102,5 +102,19 @@ int job_queue_pop(struct job_queue *job_queue, void **data) {
 
   pthread_mutex_unlock(&job_queue->lock);
   return 0;
+  
+  }
 
+int job_queue_finished(struct job_queue *job_queue){
+    pthread_mutex_lock(&job_queue->lock);
+    job_queue->destroying = 1;
+
+    pthread_cond_broadcast(&job_queue->not_empty); 
+    pthread_cond_broadcast(&job_queue->not_full);
+
+    pthread_mutex_unlock(&job_queue->lock);
+    return 0;
 }
+
+  
+
