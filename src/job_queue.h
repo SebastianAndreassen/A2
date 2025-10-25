@@ -2,17 +2,24 @@
 #define JOB_QUEUE_H
 
 #include <pthread.h>
+#include <stdbool.h>
 
 struct job_queue {
-  int capacity;
-  int head;
-  int tail;
-  int count;
-  int destroying;
-  void **buffer;
+  void **buffer;           // Circular buffer
+  int capacity;            // Max number of elements
+  int head;                // Next pop index
+  int tail;                // Next push index
+  int count;               // Number of elements
+  bool destroying;         // Flag set by destroy()
+
   pthread_mutex_t lock;
   pthread_cond_t not_full;
   pthread_cond_t not_empty;
+};
+
+struct worker {
+  struct job_queue *jq;
+  const char *needle;
 };
 
 // Initialise a job queue with the given capacity.  The queue starts out
@@ -34,8 +41,5 @@ int job_queue_push(struct job_queue *job_queue, void *data);
 // job_queue_destroy() has been called (possibly after the call to
 // job_queue_pop() blocked), this function will return -1.
 int job_queue_pop(struct job_queue *job_queue, void **data);
-
-
-int job_queue_finished(struct job_queue *job_queue);
 
 #endif

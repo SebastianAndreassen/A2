@@ -6,29 +6,20 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
-
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fts.h>
-
-// err.h contains various nonstandard BSD extensions, but they are
-// very handy.
 #include <err.h>
-
 #include <pthread.h>
-
 #include "job_queue.h"
-struct tworker{
-  char const *needle;
-  pthread_t id_t;
-  struct job_queue *jq;
-};
+
+// Initialize print mutex
 pthread_mutex_t stdout_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-
-int fauxgrep_file(char const *needle, char const *path) {
+static int fauxgrep_file_mt(char const *needle, char const *path) {
+  // Open file
   FILE *f = fopen(path, "r");
-
+  // If file fails to open, return with warning
   if (f == NULL) {
     warn("failed to open %s", path);
     return -1;
@@ -36,33 +27,68 @@ int fauxgrep_file(char const *needle, char const *path) {
 
   char *line = NULL;
   size_t linelen = 0;
-  int lineno = 1;
+  int linenum = 1;
 
   while (getline(&line, &linelen, f) != -1) {
-    assert(pthread_mutex_lock(&stdout_mutex) == 0);
+    // If the substring is found in the haystack, print where it was found
     if (strstr(line, needle) != NULL) {
-      printf("%s:%d: %s", path, lineno, line);
+      assert(pthread_mutex_lock(&stdout_mutex) == 0);
+      printf("%s:%d: %s", path, linenum, line);
+      assert(pthread_mutex_unlock(&stdout_mutex) == 0);
     }
-    lineno++;
-    assert(pthread_mutex_unlock(&stdout_mutex) == 0);
+    linenum++;
   }
-
+  // Free memory for loaded line, close file, and return
   free(line);
   fclose(f);
-
   return 0;
 }
 
-void* worker(void *arg){
-  struct tworker* tw =(struct tworker*)arg;
-  void *data;
+// -- Instruction set for worker threads --
+static void* worker(void *arg){
+  struct worker* w = (struct worker*)arg;
+  struct job_queue *jq = w->jq;
+  const char *needle = w->needle;
 
-  while(job_queue_pop(tw->jq,&data)==0){
-    char *path=(char*) data;
-    fauxgrep_file(tw->needle,path);
+  for (;;) { // endless for-loop/no condtion loop
+    char *path = NULL;
+    if (job_queue_pop(jq, (void**)&path) != 0 || path == NULL) { // Pop job of queue
+      break; // pop failed/queue error or shutdown
+    }
+    // Process the file popped from the queue
+    (void)fauxgrep_file_mt(needle, path); // Casting void ensures we get the side-effects of the function but disregarding the return value
     free(path);
-  }
+  } 
   return NULL;
+}
+
+// Producer that traverse directories with FTS and enqueue files
+static void traverse_and_enqueue(struct job_queue *jq, char * const *paths) {
+  int fts_options = FTS_LOGICAL | FTS_NOCHDIR;
+  FTS *ftsp;
+  if ((ftsp = fts_open(paths, fts_options, NULL)) == NULL) {
+    err(1, "fts_open() failed");
+  }
+
+  FTSENT *p;
+  while ((p = fts_read(ftsp)) != NULL) {
+    switch (p->fts_info) {
+      case FTS_D:
+        break;
+      case FTS_F: {
+        // strdup: FTS uses internal buffers that get reused, so we must copy
+        char *copy = strdup(p->fts_path);
+        if (job_queue_push(jq, copy) != 0) {
+          warn("job_queue_push() failed - stopping traversal"); // If push fails due to shutdown, stop producing.
+          free(copy);
+          break;
+        }
+      }
+      default:
+        break;
+    }
+  }
+  fts_close(ftsp);
 }
 
 int main(int argc, char * const *argv) {
@@ -72,91 +98,57 @@ int main(int argc, char * const *argv) {
   }
 
   int num_threads = 1;
-  char const *needle = argv[1];
-  char * const *paths = &argv[2];
-
+  char const *needle;
+  char * const *paths;
 
   if (argc > 3 && strcmp(argv[1], "-n") == 0) {
-    // Since atoi() simply returns zero on syntax errors, we cannot
-    // distinguish between the user entering a zero, or some
-    // non-numeric garbage.  In fact, we cannot even tell whether the
-    // given option is suffixed by garbage, i.e. '123foo' returns
-    // '123'.  A more robust solution would use strtol(), but its
-    // interface is more complicated, so here we are.
+    // Simple atoi parsing (same note as template): non-numeric becomes 0.
     num_threads = atoi(argv[2]);
-
     if (num_threads < 1) {
       err(1, "invalid thread count: %s", argv[2]);
     }
-
     needle = argv[3];
     paths = &argv[4];
-
   } else {
     needle = argv[1];
     paths = &argv[2];
   }
-
-  // Initialise the job queue and some worker threads here.
-  struct job_queue *jq;
-  jq=malloc(sizeof(struct job_queue));
-  job_queue_init(jq,10);
-
-  for(int i=0;paths[i]!=NULL;i++){
-    char *pathscopy=strdup(paths[i]);
-    
-    if (pathscopy == NULL) {
-      err(1, "strdup failed");
-    }
-    job_queue_push(jq,pathscopy);
+  // Initialize the job queue
+  struct job_queue jq;
+  if (job_queue_init(&jq, 128) != 0) {
+    err(1, "job_queue_init() failed");
   }
-  struct tworker tw[num_threads];
-  for(int i=0;i<num_threads;i++){
-    tw[i].jq=jq;
-    tw[i].needle=needle;
-    if(pthread_create(&tw[i].id_t,NULL,worker,&tw[i])!=0 ){
-      printf("Initizilization failde");
-      return EXIT_FAILURE;
+
+  struct worker w = {
+    .jq = &jq,
+    .needle = needle
+  };
+  // Allocate for worker threads
+  pthread_t *threads = calloc((size_t)num_threads, sizeof(pthread_t));
+  if (!threads) { 
+    err(1, "calloc() for threads failed");
+  }
+  // Create worker threads
+  for (int i = 0; i < num_threads; i++){
+    if (pthread_create(&threads[i], NULL, worker, &w) != 0 ){
+      err(1, "pthread_create() failed");
     }
   }
-  // FTS_LOGICAL = follow symbolic links
-  // FTS_NOCHDIR = do not change the working directory of the process
-  //
-  // (These are not particularly important distinctions for our simple
-  // uses.)
-  int fts_options = FTS_LOGICAL | FTS_NOCHDIR;
-
-  FTS *ftsp;
-  if ((ftsp = fts_open(paths, fts_options, NULL)) == NULL) {
-    err(1, "fts_open() failed");
-    return -1;
+  // Traverse directories and enqueue jobs
+  traverse_and_enqueue(&jq, paths);
+  // Producer done – signal workers to stop
+  for (int i = 0; i < num_threads; i++) {
+    job_queue_push(&jq, NULL);
   }
-
-  FTSENT *p;
-  while ((p = fts_read(ftsp)) != NULL) {
-    switch (p->fts_info) {
-    case FTS_D:
-      break;
-    case FTS_F:
-      fauxgrep_file(needle, p->fts_path);
-      break;
-    default:
-      break;
+  // Join all threads
+  for (int i = 0; i < num_threads; i++){
+    if (pthread_join(threads[i], NULL) != 0) {
+      err(1, "pthread_join() failed");
     }
   }
-
-  fts_close(ftsp);
-  // Shut down the job queue and the worker threads here.
-  
-  job_queue_finished(jq);
-
-  for(int i=0;i<num_threads;i++){
-    pthread_join(tw[i].id_t,NULL);
-  }
-
-  job_queue_destroy(jq);
-  
-  free(jq);
+  free(threads);
+  // Shut down the job queue
+  job_queue_destroy(&jq);
 
   return 0;
 }
