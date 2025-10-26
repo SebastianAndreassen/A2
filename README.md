@@ -2,7 +2,9 @@
 
 Assignment A2 in the course Computer Systems @ DIKU, UCPH
 
-Asger Ussing - ctz435 <br> Sebastian Andreassen - bwj836 <br> Victor Panduro Andersen - xkf701
+Asger Ussing - ctz435  
+Sebastian Andreassen - bwj836  
+Victor Panduro Andersen - xkf701
 
 <https://github.com/SebastianAndreassen/A2>
 
@@ -32,21 +34,24 @@ Asger Ussing - ctz435 <br> Sebastian Andreassen - bwj836 <br> Victor Panduro And
 
 ---
 
-**To run the test script:**
+**To run the programs with coverage:**
 
-1. Follow step 1-3 from above.
-2. Run the command:
+Follow step 1-3 from above.
 
-    ~~~bash
-    ./tests.sh
-    ~~~
-
-3. Locate and view the "valgrind_output.txt" and "helgrind_output.txt" files in the src/test_results folder.
-
-If you do not have the permission to run the test script, then run the command:
+To run any of the programs with valgrind memory leak coverage, run the command:
 
 ~~~bash
-chmod +x tests.sh
+valgrind -s ./<program and its parameters> 
 ~~~
 
-And then rerun 2.
+To run any of the programs with helgrind thread safety coverage, run the command:
+
+~~~bash
+valgrind --tool=helgrind -s ./<program and its parameters>
+~~~
+
+To benchmark and test the programs' running times, run the command:
+
+~~~bash
+time ./<program and its parameters>
+~~~
